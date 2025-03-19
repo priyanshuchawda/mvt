@@ -22,3 +22,4 @@ build/
 
 # Matplotlib generated plots
 *.png
+mvt_plot.png
