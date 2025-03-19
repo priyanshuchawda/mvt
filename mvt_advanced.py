@@ -55,8 +55,33 @@ def adaptive_numerical_solver(f_prime, m, a, b, max_points=50, tol=1e-12):
     # Define the function to find roots of: f'(x) - m
     def func_to_solve(val):
         try:
-            return float(f_prime.subs(x, val)) - float(m)
-        except Exception:
+            # Special handling for all fractional powers
+            result = f_prime.subs(x, val)
+            
+            # Recursive function to handle fractional powers in complex expressions
+            def process_pow_expression(expr):
+                if isinstance(expr, sp.Pow):
+                    base, exp = expr.args
+                    if isinstance(exp, sp.Rational) and exp.p == 1:
+                        # For any fractional power 1/n
+                        n = exp.q
+                        if n > 1:  # Only process non-integer powers
+                            return sp.sign(base)**(1/n) * (sp.Abs(base) ** exp)
+                
+                # Process composite expressions recursively
+                if expr.args:
+                    new_args = [process_pow_expression(arg) for arg in expr.args]
+                    if new_args != list(expr.args):
+                        return expr.func(*new_args)
+                return expr
+            
+            result = process_pow_expression(result)
+            
+            # Convert the result to float for numerical operations
+            return float(result - m)
+        except Exception as e:
+            # For debugging, uncomment this:
+            # print(f"Error evaluating at x={val}: {e}")
             return np.inf  # Return infinity for invalid points
     
     # Initial uniform sampling
@@ -68,7 +93,7 @@ def adaptive_numerical_solver(f_prime, m, a, b, max_points=50, tol=1e-12):
     for point in test_points:
         try:
             val = func_to_solve(point)
-            if not np.isnan(val) and not np.isinf(val):
+            if not np.isnan(val) and not np.isinf(val) and not isinstance(val, complex):
                 f_values.append(val)
                 valid_points.append(point)
         except Exception:
@@ -292,10 +317,27 @@ def enhanced_compute_lmvt(f, a, b, timeout=1):
         float: The average slope m
     """
     try:
+        # Check domain validity with enhanced warnings
+        is_valid, invalid_points, domain_warnings = check_domain_validity(f, a, b)
+        if domain_warnings:
+            print("\nDomain Warnings:")
+            for warning in domain_warnings:
+                print(f"- {warning}")
+        if not is_valid:
+            print("\nFunction has invalid points in the interval:")
+            print(f"Invalid at x = {invalid_points}")
+            print("The calculator will attempt to work around these points.")
+        
         # Calculate the average slope
         f_a = f.subs(x, a)
         f_b = f.subs(x, b)
         m = (f_b - f_a) / (b - a)
+        
+        # Check if m is complex, if so, take the real part with warning
+        if m.is_complex or (hasattr(m, 'has_nonzero_imaginary_part') and m.has_nonzero_imaginary_part()):
+            print(f"Warning: Average slope contains complex values: {m}")
+            print("Taking real part for calculations.")
+            m = sp.re(m)
         
         # Compute the derivative
         f_prime = diff(f, x)
@@ -339,7 +381,8 @@ def enhanced_compute_lmvt(f, a, b, timeout=1):
                            if sol.is_real and a < float(sol) < b]
                 
                 if c_values:
-                    return c_values, float(m)
+                    # Ensure m is a float to avoid complex conversion issues
+                    return c_values, float(sp.re(m))
                 else:
                     print("No symbolic solutions found in the interval, trying numerical methods")
         except Exception as e:
@@ -350,19 +393,28 @@ def enhanced_compute_lmvt(f, a, b, timeout=1):
         c_values = multi_method_solver(f_prime, m, a, b)
         
         if c_values:
-            return c_values, float(m)
+            # Ensure m is a float to avoid complex conversion issues
+            return c_values, float(sp.re(m))
         else:
             # Final attempt with a very thorough search
             print("Attempting thorough numerical search...")
             # Increase the number of test points for a more thorough search
             c_values = adaptive_numerical_solver(f_prime, m, a, b, max_points=50, tol=1e-10)
-            return c_values, float(m)
+            # Ensure m is a float to avoid complex conversion issues
+            return c_values, float(sp.re(m))
             
     except Exception as e:
         print(f"Error in enhanced_compute_lmvt: {e}")
     
     # If all methods fail, return empty list and the slope if calculated
-    return [], float(m) if 'm' in locals() else None
+    if 'm' in locals():
+        try:
+            # Ensure we're returning a real float
+            return [], float(sp.re(m))
+        except Exception:
+            return [], None
+    else:
+        return [], None
 
 def enhanced_compute_rmvt(f, a, b, timeout=1):
     """
@@ -459,7 +511,7 @@ def enhanced_compute_rmvt(f, a, b, timeout=1):
 def check_domain_validity(f, a, b, num_points=20):
     """
     Check if a function is valid over a domain by sampling points.
-    This helps prevent evaluation errors before attempting to solve.
+    Now includes better handling of complex results and special cases.
     
     Args:
         f: SymPy expression representing the function
@@ -468,21 +520,85 @@ def check_domain_validity(f, a, b, num_points=20):
         num_points: Number of test points to sample
         
     Returns:
-        tuple: (is_valid, invalid_points) where is_valid is a boolean and
-               invalid_points is a list of x values where the function is undefined
+        tuple: (is_valid, invalid_points, warnings) where:
+               - is_valid is a boolean
+               - invalid_points is a list of x values where the function is undefined
+               - warnings is a list of strings with specific warnings about the domain
     """
     test_points = np.linspace(a, b, num_points)
     invalid_points = []
+    warnings = []
+    
+    # First check if the function involves potential complex outputs
+    expr_str = str(f)
+    # Look for any fractional powers using a more general regex pattern
+    import re
+    fractional_power_pattern = r'\*\*\s*\(\s*1\s*/\s*(\d+)\s*\)'
+    root_matches = re.findall(fractional_power_pattern, expr_str)
+    
+    if root_matches:
+        for n in root_matches:
+            if int(n) % 2 == 0:  # Even roots
+                warnings.append(f"Function contains {n}th roots which may produce complex values for negative inputs.")
+            else:  # Odd roots
+                warnings.append(f"Function contains {n}th roots which may need special handling for negative inputs.")
+    elif ']**(1/3)' in expr_str or '**(1/3)' in expr_str or 'cbrt' in expr_str:
+        warnings.append("Function contains cube roots which may need special handling for negative inputs.")
+    elif ']**(1/2)' in expr_str or '**(1/2)' in expr_str or 'sqrt' in expr_str:
+        warnings.append("Function contains square roots which may produce complex values for negative inputs.")
+    
+    # Check points for validity using our custom eval approach
+    def safe_eval(expr, point):
+        try:
+            # First use sympy's evalf for exact symbolic evaluation
+            result = expr.subs(x, point)
+            
+            # Handle fractional powers of negative values
+            def process_pow_expression(expr):
+                if isinstance(expr, sp.Pow):
+                    base, exp = expr.args
+                    if isinstance(exp, sp.Rational) and exp.p == 1 and exp.q > 1:
+                        n = exp.q
+                        if n > 1:  # Only process non-integer powers
+                            return sp.sign(base)**(1/n) * (sp.Abs(base) ** exp)
+                
+                # Process composite expressions recursively
+                if expr.args:
+                    new_args = [process_pow_expression(arg) for arg in expr.args]
+                    if new_args != list(expr.args):
+                        return expr.func(*new_args)
+                return expr
+            
+            # If symbolic eval results in complex, try our custom approach
+            if 'I' in str(result):
+                result = process_pow_expression(expr).subs(x, point)
+            
+            # Convert to float for numerical checks
+            float_result = float(result)
+            return float_result, np.isnan(float_result) or np.isinf(float_result)
+        except Exception as e:
+            return None, True
     
     for point in test_points:
-        try:
-            result = float(f.subs(x, point))
-            if np.isnan(result) or np.isinf(result):
-                invalid_points.append(point)
-        except Exception:
+        result, is_invalid = safe_eval(f, point)
+        if is_invalid:
             invalid_points.append(point)
+            if result is None:
+                # Try to identify the specific issue
+                try:
+                    f.subs(x, point)
+                except Exception as e:
+                    err_msg = str(e)
+                    if "cannot convert complex" in err_msg:
+                        warnings.append(f"Complex values detected near x = {point}")
+                    elif "division by zero" in err_msg:
+                        warnings.append(f"Division by zero detected near x = {point}")
     
-    return len(invalid_points) == 0, invalid_points
+    # Check for removable discontinuities
+    if '/' in str(f):
+        warnings.append("Function contains division. Check for removable discontinuities.")
+    
+    return len(invalid_points) == 0, invalid_points, warnings
 
 def enhanced_plot_function_and_theorems(f, a, b, lmvt_points, rmvt_points, avg_slope):
     """

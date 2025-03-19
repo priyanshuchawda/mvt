@@ -13,6 +13,8 @@ Usage:
 import sympy as sp
 import warnings
 import mpmath as mp
+import re
+import numpy as np
 from sympy import Symbol, sympify
 from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application
 
@@ -80,10 +82,13 @@ def get_function_input():
                 'cosh': sp.cosh,
                 'tanh': sp.tanh,
                 'sqrt': sp.sqrt,
-                'abs': sp.Abs
+                'abs': sp.Abs,
+                # Add custom root functions that handle negative numbers correctly
+                'cbrt': lambda x: sp.sign(x) * (sp.Abs(x) ** (sp.Rational(1, 3))),
+                'nthroot': lambda x, n: sp.sign(x)**(1/n) * (sp.Abs(x) ** (sp.Rational(1, n)))
             }
             
-            # Get the function from the user with examples including transcendental functions
+            # Get the function from the user with examples
             print("\nFunction input examples:")
             print("  Polynomials: x**2 - 2*x + 1")
             print("  Exponential: exp(x) or exp(2*x)")
@@ -91,59 +96,114 @@ def get_function_input():
             print("  Trigonometric: sin(x), cos(x), tan(x)")
             print("  Combined: x**2 * exp(-x) or log(4,x)/x")
             print("  Complex: sin(x) + log(2,x) or exp(2*x) + sin(x)")
-            func_str = input("\nEnter a function f(x): ")
+            print("  Roots: cbrt(x) for cube root, sqrt(x) for square root, x**(1/n) for nth root")
+            func_str = input("\nEnter a function f(x): ").strip()
             
-            # Handle common user input patterns more comprehensively
+            # Pre-process the input string
+            # First handle special cases that need preservation
+            func_str = re.sub(r'(\d*\.?\d+)[eE]\^', r'\1*exp', func_str)  # Handle scientific notation
+            
+            # Remove all spaces
+            func_str = re.sub(r'\s+', '', func_str)
+            
+            # Pre-process fractional power patterns into nthroot form
+            # Match x**(1/n) patterns for any n
+            pattern = r'x\*\*\s*\(\s*1\s*/\s*(\d+)\s*\)'
+            matches = re.findall(pattern, func_str)
+            for n in matches:
+                # Replace x**(1/n) with nthroot(x,n)
+                func_str = re.sub(r'x\*\*\s*\(\s*1\s*/\s*' + n + r'\s*\)', f'nthroot(x,{n})', func_str)
+            
+            # Also handle decimal forms like x**(0.333...)
+            func_str = re.sub(r'x\*\*\(1\.0/3\.0\)', r'cbrt(x)', func_str)
+            func_str = re.sub(r'x\*\*\(1\.0/3\)', r'cbrt(x)', func_str)
+            func_str = re.sub(r'x\*\*\(1/3\.0\)', r'cbrt(x)', func_str)
+            
             # Handle exponential expressions
-            func_str = func_str.replace("e^x", "exp(x)")
-            func_str = func_str.replace("e^(", "exp(")
-            func_str = func_str.replace("e^", "exp")
-            func_str = func_str.replace("e**", "exp")
+            func_str = re.sub(r'e\^([x\(\w])', r'exp(\1)', func_str)  # e^x or e^(...)
+            func_str = re.sub(r'e\*\*', 'exp', func_str)  # e**x
+            
+            # Handle powers carefully - this is a key fix for x**(1/n) type expressions
+            func_str = re.sub(r'\*\*\s*', '**', func_str)  # Remove spaces around **
             
             # Handle logarithmic expressions
-            func_str = func_str.replace("ln(", "log(")
+            func_str = re.sub(r'ln\(', 'log(', func_str)
             
-            # Ensure proper handling of nested expressions
-            # Replace any remaining e^something patterns with a more comprehensive regex
-            import re
-            func_str = re.sub(r'e\^([a-zA-Z0-9_\+\-\*\/\(\)\s]+)', r'exp(\1)', func_str)
+            # Handle trigonometric functions
+            func_str = re.sub(r'sec\((.*?)\)', r'1/cos(\1)', func_str)
+            func_str = re.sub(r'csc\((.*?)\)', r'1/sin(\1)', func_str)
+            func_str = re.sub(r'cot\((.*?)\)', r'1/tan(\1)', func_str)
             
-            # Parse the function string into a SymPy expression with our custom local dictionary
+            # Add minimal spaces around operators for readability in error messages
+            func_str = re.sub(r'([+\-*/])', r' \1 ', func_str)
+            # But remove spaces around ** to preserve power operations
+            func_str = re.sub(r'\s*\*\*\s*', r'**', func_str)
+            
+            print(f"Processing function: {func_str}")
+            
+            # Parse the function string into a SymPy expression
             x = Symbol('x')
             f = parse_expr(func_str, transformations=transformations, local_dict=local_dict)
             
-            # Test if the function can be evaluated at a valid point
-            # For logarithmic functions, test at x=2 instead of x=1
-            # For more complex functions, try multiple test points
-            test_points = []
-            if "log" in func_str.lower():
-                # For logarithmic functions, ensure test point is positive
-                test_points = [2, 3]
-            else:
-                test_points = [1, 2]
-                
-            # Try each test point until one works
+            # Handle fractional powers by converting them to appropriate root expressions
+            def process_powers(expr):
+                if isinstance(expr, sp.Pow):
+                    base, exp = expr.args
+                    if isinstance(exp, sp.Rational) and exp.p == 1 and exp.q > 1:
+                        # For any fractional power 1/n
+                        n = exp.q
+                        # For even roots (which could produce complex results with negative inputs)
+                        if n % 2 == 0:
+                            return sp.sign(base)**(1/n) * (sp.Abs(base) ** exp)
+                        # For odd roots (which should work with negative inputs)
+                        else:
+                            # Use direct handling that preserves the sign
+                            return sp.sign(base) * (sp.Abs(base) ** exp)
+                    
+                # If not a fractional power or for composite expressions, process recursively
+                if expr.args:
+                    new_args = [process_powers(arg) for arg in expr.args]
+                    if new_args != list(expr.args):
+                        return expr.func(*new_args)
+                return expr
+            
+            # Process all fractional powers in the expression
+            f = process_powers(f)
+            
+            # Simplify removable discontinuities if possible
+            f = sp.simplify(f)
+            
+            # Test both positive and negative points
+            test_points = [-2, -1, 1, 2]
+            valid_points = False
+            
             for point in test_points:
                 try:
                     test_val = float(f.subs(x, point))
-                    # If we get here without exception, the function is valid at this point
-                    return f
+                    if not (np.isnan(test_val) or np.isinf(test_val)):
+                        valid_points = True
+                        break
                 except Exception as e:
-                    # If this test point fails, try the next one
                     if point == test_points[-1]:
-                        # If this was the last test point, re-raise the exception
-                        raise e
+                        print(f"Warning: Function evaluation failed at x={point}: {str(e)}")
                     continue
             
-            return f
+            if valid_points:
+                return f
+            
+            raise ValueError("Function could not be evaluated at any test points")
+            
         except Exception as e:
-            print(f"Error parsing function: {e}")
-            print("Please try again with a valid mathematical expression.")
-            print("For exponential functions, use 'exp(x)' instead of 'e^x' or 'e**x'.")
-            print("For logarithms, use 'log(x)' for natural logarithm or 'log(10,x)' for base 10.")
-            print("Make sure your function is defined for the test points (x=1, x=2, etc.).")
-            print("For complex expressions, ensure proper parentheses and syntax.")
-            print("For mixed functions (like sin(x) + log(2,x)), the calculator will use numerical methods.")
+            print(f"\nError parsing function: {str(e)}")
+            print("\nPlease try again with a valid mathematical expression.")
+            print("Tips:")
+            print("1. For exponential functions, use 'exp(x)' or 'e^x'")
+            print("2. For cube root, use 'cbrt(x)' or x**(1/3)")
+            print("3. For nth root, use 'nthroot(x,n)' or x**(1/n)")
+            print("4. For square root, use 'sqrt(x)' or x**(1/2)")
+            print("5. For logarithms, use 'log(x)' or 'log(base,x)'")
+            print("6. For trigonometric functions, ensure arguments are properly parenthesized")
+            print("7. Ensure all variables are 'x' and all functions are supported\n")
 
 def get_interval_input():
     """
@@ -239,7 +299,11 @@ def main():
         
         # Check domain validity if enhanced functions are available
         if USE_ENHANCED_FUNCTIONS:
-            is_valid, invalid_points = check_domain_validity(f, a, b)
+            is_valid, invalid_points, domain_warnings = check_domain_validity(f, a, b)
+            if domain_warnings:
+                print("\nDomain Warnings:")
+                for warning in domain_warnings:
+                    print(f"- {warning}")
             if not is_valid:
                 print("\nWarning: The function may not be valid at all points in the interval.")
                 print(f"Points where the function is undefined or returns invalid values: {invalid_points}")

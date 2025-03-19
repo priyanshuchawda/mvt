@@ -35,6 +35,43 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 # Define the symbol for the variable
 x = Symbol('x')
 
+def handle_removable_discontinuities(f, x):
+    """
+    Attempt to simplify expressions with removable discontinuities.
+    For example, (x^2 - 1)/(x - 1) simplifies to (x + 1).
+    
+    Args:
+        f: SymPy expression representing the function
+        x: Symbol representing the variable
+        
+    Returns:
+        SymPy expression: Simplified function if possible, original function otherwise
+    """
+    try:
+        # Try standard algebraic simplification first
+        simplified = sp.simplify(f)
+        
+        # If the expression contains division, check for removable discontinuities
+        if '/' in str(simplified):
+            # Convert to rational function
+            num, den = simplified.as_numer_denom()
+            
+            # Try to factor both numerator and denominator
+            num_factor = sp.factor(num)
+            den_factor = sp.factor(den)
+            
+            # Check if any factors cancel out
+            cancelled = sp.cancel(simplified)
+            
+            # If cancellation resulted in a simpler expression, use it
+            if len(str(cancelled)) < len(str(simplified)):
+                return cancelled
+        
+        return simplified
+    except Exception as e:
+        print(f"Warning: Could not simplify expression: {e}")
+        return f
+
 def is_continuous_on_interval(f, a, b):
     """
     Check if a function is continuous on the interval [a, b].
@@ -49,17 +86,20 @@ def is_continuous_on_interval(f, a, b):
         bool: True if the function appears continuous, False otherwise
     """
     try:
+        # First try to simplify any removable discontinuities
+        f_simplified = handle_removable_discontinuities(f, x)
+        
         # Convert symbolic function to a numerical function
-        f_num = lambdify(x, f, 'numpy')
+        f_num = lambdify(x, f_simplified, 'numpy')
         
         # Check for undefined values at endpoints
-        f_a = float(f.subs(x, a))
-        f_b = float(f.subs(x, b))
+        f_a = float(f_simplified.subs(x, a))
+        f_b = float(f_simplified.subs(x, b))
         
         # Check for undefined values at some points in between
         test_points = np.linspace(a, b, 20)
         for point in test_points:
-            f_val = float(f.subs(x, point))
+            f_val = float(f_simplified.subs(x, point))
             if np.isnan(f_val) or np.isinf(f_val):
                 return False
         
@@ -68,6 +108,75 @@ def is_continuous_on_interval(f, a, b):
         print(f"Error checking continuity: {e}")
         return False
 
+def custom_derivative(f, x):
+    """
+    Compute derivative with special handling for certain functions.
+    
+    Args:
+        f: SymPy expression representing the function
+        x: Symbol to differentiate with respect to
+        
+    Returns:
+        SymPy expression representing the derivative
+    """
+    try:
+        # Handle any fractional power specially for negative values
+        if isinstance(f, sp.Pow):
+            base, exp = f.args
+            if isinstance(exp, sp.Rational) and exp.p == 1 and exp.q > 1:
+                # For any fractional power 1/n where n > 1
+                n = exp.q
+                # First ensure we have sign(x)|x|^(1/n)
+                f = sp.sign(base) * (sp.Abs(base) ** exp)
+                # Then differentiate this form to get sign(x)/(n|x|^((n-1)/n))
+                return sp.sign(base) / (n * (sp.Abs(base) ** (sp.Rational(n-1, n))))
+        
+        # Handle absolute value specially
+        elif isinstance(f, sp.Abs):
+            # Create a piecewise function for the derivative of abs(x)
+            return sp.Piecewise(
+                (1, x > 0),
+                (-1, x < 0),
+                (sp.nan, True)  # undefined at x = 0
+            )
+        
+        # Recursive handling for composite expressions
+        elif hasattr(f, 'args') and f.args:
+            # Check if any of the arguments are functions that need special handling
+            needs_special_handling = False
+            for arg in f.args:
+                if (isinstance(arg, sp.Pow) and 
+                    isinstance(arg.args[1], sp.Rational) and 
+                    arg.args[1].p == 1 and arg.args[1].q > 1):
+                    needs_special_handling = True
+                    break
+            
+            if needs_special_handling:
+                # Apply chain rule by differentiating each part appropriately
+                if f.func == sp.Add:
+                    return sp.Add(*[custom_derivative(arg, x) for arg in f.args])
+                elif f.func == sp.Mul:
+                    # Product rule: d/dx(u*v) = u'v + uv'
+                    u, v = f.args[0], sp.Mul(*f.args[1:]) if len(f.args) > 1 else 1
+                    return u * custom_derivative(v, x) + custom_derivative(u, x) * v
+                elif f.func == sp.Pow:
+                    # For f(x)^g(x) type expressions
+                    base, power = f.args
+                    if power.has(x):
+                        # Full power rule with logarithm
+                        return f * (custom_derivative(power, x) * sp.log(base) + 
+                                    power * custom_derivative(base, x) / base)
+                    else:
+                        # Simple power rule: d/dx(f(x)^n) = n*f(x)^(n-1)*f'(x)
+                        return power * base**(power-1) * custom_derivative(base, x)
+        
+        # Default to normal differentiation for all other cases
+        return sp.diff(f, x)
+    except Exception as e:
+        print(f"Error in custom derivative: {e}")
+        return sp.diff(f, x)  # Fall back to normal differentiation
+
+# Replace all uses of diff() with custom_derivative()
 def is_differentiable_on_interval(f, a, b):
     """
     Check if a function is differentiable on the interval (a, b).
@@ -82,8 +191,8 @@ def is_differentiable_on_interval(f, a, b):
         bool: True if the function appears differentiable, False otherwise
     """
     try:
-        # Compute the derivative
-        f_prime = diff(f, x)
+        # Use custom derivative handling
+        f_prime = custom_derivative(f, x)
         
         # Convert symbolic derivative to a numerical function
         f_prime_num = lambdify(x, f_prime, 'numpy')
@@ -102,8 +211,18 @@ def is_differentiable_on_interval(f, a, b):
 
 def compute_lmvt(f, a, b, numerical_fallback=True):
     """
-    Compute the point c in (a, b) where f'(c) equals the average slope,
+    Compute the point(s) c in (a, b) where f'(c) equals the average slope,
     as guaranteed by the Lagrange Mean Value Theorem.
+    
+    The Lagrange Mean Value Theorem states that for a function f(x) that is:
+    1. Continuous on the closed interval [a, b]
+    2. Differentiable on the open interval (a, b)
+    
+    There exists at least one point c ∈ (a, b) such that:
+    f'(c) = [f(b) - f(a)] / (b - a)
+    
+    This theorem is more general than Rolle's Theorem, which is the special case
+    where f(a) = f(b), making the average slope zero. In that case, f'(c) = 0.
     
     Args:
         f: SymPy expression representing the function
@@ -124,6 +243,10 @@ def compute_lmvt(f, a, b, numerical_fallback=True):
             print("Error: The interval [a, b] must have a < b.")
             return [], None
         
+        # First try to simplify any removable discontinuities
+        f = handle_removable_discontinuities(f, x)
+        print(f"Simplified function: f(x) = {f}")
+        
         # Check if the function is continuous on [a, b] and differentiable on (a, b)
         if not is_continuous_on_interval(f, a, b):
             print("Error: The function must be continuous on the interval [a, b].")
@@ -138,8 +261,9 @@ def compute_lmvt(f, a, b, numerical_fallback=True):
         f_b = f.subs(x, b)
         m = (f_b - f_a) / (b - a)
         
-        # Compute the derivative
-        f_prime = diff(f, x)
+        # Compute the derivative using custom handling
+        f_prime = custom_derivative(f, x)
+        print(f"Computed derivative: f'(x) = {f_prime}")
         
         # Try symbolic solution first
         try:
@@ -322,6 +446,12 @@ def compute_rmvt(f, a, b, numerical_fallback=True):
     Compute the point(s) c in (a, b) where f'(c) = 0,
     as required by Rolle's Theorem when f(a) = f(b).
     
+    Rolle's Theorem is a special case of the Lagrange Mean Value Theorem where:
+    - All conditions of LMVT must be satisfied (continuity on [a,b], differentiability on (a,b))
+    - Additionally, f(a) = f(b)
+    - When f(a) = f(b), the average slope (f(b)-f(a))/(b-a) = 0
+    - Therefore, f'(c) = 0 at the point(s) c guaranteed by the theorem
+    
     Args:
         f: SymPy expression representing the function
         a: Left endpoint of the interval
@@ -360,7 +490,7 @@ def compute_rmvt(f, a, b, numerical_fallback=True):
             return [], rolles_condition
         
         # Compute the derivative
-        f_prime = diff(f, x)
+        f_prime = custom_derivative(f, x)
         
         # Try symbolic solution first
         try:
