@@ -78,6 +78,16 @@ def get_function_input():
                 'arcsin': sp.asin,
                 'arccos': sp.acos,
                 'arctan': sp.atan,
+                'asin': sp.asin,
+                'acos': sp.acos,
+                'atan': sp.atan,
+                # Improved implementations for inverse trigonometric functions
+                'arcsec': lambda x: sp.acos(1/x),  # arcsec(x) = arccos(1/x)
+                'arccsc': lambda x: sp.asin(1/x),  # arccsc(x) = arcsin(1/x)
+                'arccot': lambda x: sp.atan(1/x),  # arccot(x) = arctan(1/x)
+                'asec': lambda x: sp.acos(1/x),    # Same as arcsec
+                'acsc': lambda x: sp.asin(1/x),    # Same as arccsc
+                'acot': lambda x: sp.atan(1/x),    # Same as arccot
                 'sinh': sp.sinh,
                 'cosh': sp.cosh,
                 'tanh': sp.tanh,
@@ -94,6 +104,8 @@ def get_function_input():
             print("  Exponential: exp(x) or exp(2*x)")
             print("  Logarithmic: log(x) for natural log, log(10,x) for log base 10")
             print("  Trigonometric: sin(x), cos(x), tan(x)")
+            print("  Inverse Trigonometric: arcsin(x), asin(x), arccos(x), acos(x), arctan(x), atan(x)")
+            print("  Inverse Secant/Cosecant/Cotangent: arcsec(x), asec(x), arccsc(x), acsc(x), arccot(x), acot(x)")
             print("  Combined: x**2 * exp(-x) or log(4,x)/x")
             print("  Complex: sin(x) + log(2,x) or exp(2*x) + sin(x)")
             print("  Roots: cbrt(x) for cube root, sqrt(x) for square root, x**(1/n) for nth root")
@@ -102,6 +114,10 @@ def get_function_input():
             # Pre-process the input string
             # First handle special cases that need preservation
             func_str = re.sub(r'(\d*\.?\d+)[eE]\^', r'\1*exp', func_str)  # Handle scientific notation
+            
+            # Process inverse trigonometric functions FIRST to prevent them from being broken apart
+            # Replace all inverse trig functions with unique tokens that won't be split
+            func_str = re.sub(r'(arc|a)(sin|cos|tan|sec|csc|cot)', r'__\1\2__', func_str)
             
             # Remove all spaces
             func_str = re.sub(r'\s+', '', func_str)
@@ -134,10 +150,24 @@ def get_function_input():
             func_str = re.sub(r'csc\((.*?)\)', r'1/sin(\1)', func_str)
             func_str = re.sub(r'cot\((.*?)\)', r'1/tan(\1)', func_str)
             
+            # Handle inverse trigonometric functions with alternative notations
+            func_str = re.sub(r'sin\^-1\((.*?)\)', r'arcsin(\1)', func_str)
+            func_str = re.sub(r'cos\^-1\((.*?)\)', r'arccos(\1)', func_str)
+            func_str = re.sub(r'tan\^-1\((.*?)\)', r'arctan(\1)', func_str)
+            func_str = re.sub(r'sec\^-1\((.*?)\)', r'arcsec(\1)', func_str)
+            func_str = re.sub(r'csc\^-1\((.*?)\)', r'arccsc(\1)', func_str)
+            func_str = re.sub(r'cot\^-1\((.*?)\)', r'arccot(\1)', func_str)
+            
+            # Restore the tokenized inverse trig functions
+            func_str = re.sub(r'__arc(sin|cos|tan|sec|csc|cot)__', r'arc\1', func_str)
+            func_str = re.sub(r'__a(sin|cos|tan|sec|csc|cot)__', r'a\1', func_str)
+            
             # Add minimal spaces around operators for readability in error messages
-            func_str = re.sub(r'([+\-*/])', r' \1 ', func_str)
-            # But remove spaces around ** to preserve power operations
-            func_str = re.sub(r'\s*\*\*\s*', r'**', func_str)
+            # Modify the regex to exclude ** from being affected by the spacing
+            func_str = re.sub(r'([+\-*/])(?!\*)', r' \1 ', func_str)
+            
+            # Handle ** separately to ensure it stays together without spaces
+            func_str = re.sub(r'\*\*', '**', func_str)
             
             print(f"Processing function: {func_str}")
             
